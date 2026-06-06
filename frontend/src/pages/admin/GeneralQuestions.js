@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Plus, Trash2, Edit2, X, MessageCircle, Loader2 } from "lucide-react";
+import AnswerPreview from "@/components/AnswerPreview";
 
 const EMPTY_FORM = {
   question: "", triggers: [], response: "", buttons: [],
@@ -274,6 +275,13 @@ export default function GeneralQuestions() {
               <Switch checked={form.active} onCheckedChange={(v) => setForm(p => ({ ...p, active: v }))} />
               <Label>Active</Label>
             </div>
+
+            <AnswerPreview
+              explanation={form.response}
+              suggestions={form.suggestion_questions}
+              buttons={form.buttons}
+              emptyHint="Add a response, buttons or suggestion questions to preview how users will see this answer."
+            />
           </div>
 
           <DialogFooter>

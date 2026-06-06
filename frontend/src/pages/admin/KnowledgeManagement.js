@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Plus, Pencil, Trash2, BookOpen, FolderTree, FileText, Download } from "lucide-react";
+import AnswerPreview from "@/components/AnswerPreview";
 
 export default function KnowledgeManagement() {
   const [tab, setTab] = useState("modules");
@@ -500,6 +501,14 @@ function ItemDialog({ dialog, modules, topics, resources, onClose, onSave }) {
               })}
             </div>
           </div>
+
+          <AnswerPreview
+            explanation={form.explanation}
+            steps={form.steps.split("\n").filter(Boolean)}
+            suggestions={form.suggestions.split("\n").filter(Boolean)}
+            resources={form.resource_ids.map((rid) => resources.find((r) => r._id === rid)).filter(Boolean)}
+            emptyHint="Add an explanation, steps or suggestions to preview how users will see this answer."
+          />
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>

@@ -588,10 +588,26 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
     suggestions = get_kb_suggestions(knowledge_items, max_suggestions, module_filter) if enable_suggestions else []
 
     # ════════════════════════════════════════════
-    # BANK-LEVEL SAFETY: Score < 4 → ALWAYS show suggestions
+    # AMBIGUITY CHECK: short query (≤2 content words) OR multiple
+    # KB items match with similar confidence → show suggestions.
+    # Prevents Astra from concatenating several KB items into one
+    # mega-answer for vague queries like "digital signature".
+    # ════════════════════════════════════════════
+    query_words = extract_content_words(english_query)
+    is_short_query = len(query_words) <= 2
+    # How many items are within 60% of the top score? (i.e., similarly relevant)
+    similar_count = sum(
+        1 for it in knowledge_items if it.get("score", 0) >= max_score * 0.6
+    ) if max_score > 0 else 0
+    is_ambiguous = similar_count >= 2
+
+    force_suggestions = (is_short_query or is_ambiguous) and enable_suggestions and len(suggestions) >= 2
+
+    # ════════════════════════════════════════════
+    # BANK-LEVEL SAFETY: Score < 4 OR ambiguous → ALWAYS show suggestions
     # Never answer directly if there's any doubt
     # ════════════════════════════════════════════
-    if max_score < 4:
+    if max_score < 4 or force_suggestions:
         if suggestions:
             suggestions_out = await tl(suggestions)
             sug_msg_out = await t(suggestion_message)

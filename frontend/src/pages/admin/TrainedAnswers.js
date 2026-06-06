@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Plus, Pencil, Trash2, GraduationCap } from "lucide-react";
+import AnswerPreview from "@/components/AnswerPreview";
 
 export default function TrainedAnswers() {
   const [items, setItems] = useState([]);
@@ -152,6 +153,11 @@ function TrainedDialog({ dialog, onClose, onSave }) {
             <Input value={form.keywords} onChange={(e) => update("keywords", e.target.value)}
               placeholder="sales order, create, customer" data-testid="trained-keywords-input" />
           </div>
+
+          <AnswerPreview
+            explanation={form.answer}
+            emptyHint="Add an answer to preview how users will see this trained response."
+          />
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>

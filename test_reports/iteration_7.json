@@ -1,0 +1,42 @@
+{
+  "summary": "Iteration 7 testing: Backend ambiguity-check + AnswerPreview in 3 admin editors. Backend pytest 6/7 PASS (vague queries 'digital signature', 'biziverse', 'sales order', 'eway bill' all correctly return SSE type='suggestions' with 1-3 KB questions and ZERO token events; done event includes 'suggestions' array; 'What is Biziverse?' correctly streams a direct KB answer). FAILURE: the full specific question 'How to generate e-Way Bill Directly from Biziverse?' incorrectly returns suggestions instead of a direct answer — the is_ambiguous branch fires because the sister KB item 'Generate e-Way Bill through JSON Upload' scores within 60% of the max. Frontend: AnswerPreview component renders data-testid='answer-preview' inside ALL 3 admin editors (KnowledgeManagement /admin/knowledge → Items tab → Add Item; TrainedAnswers /admin/trained-answers → Add Trained Answer; GeneralQuestions /admin/general-questions → Add General Question). Markdown ('**bold**') is correctly rendered as <strong> inside the live preview bubble in all three dialogs.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/chat/conversations/{id}/messages", "issue": "Ambiguity check is too aggressive when an asked KB question has a sibling KB item with overlapping keywords. Query 'How to generate e-Way Bill Directly from Biziverse?' (full title of a KB item, 5 content words) returns SSE type='suggestions' because the sibling 'Generate e-Way Bill through JSON Upload' scores within 60% of max. Expected: direct KB answer because the query matches one KB title verbatim. Fix idea: skip force_suggestions when the top item's title/question normalised equals the query, OR raise the similarity threshold from 0.6 → 0.85, OR require is_short_query AND is_ambiguous (not OR)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "All 3 editor dialogs", "issues": ["Minor a11y: 'Warning: Missing Description or aria-describedby={undefined} for DialogContent' on each dialog open — non-blocking but should add DialogDescription for screen readers."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration7_test.py",
+    "/app/test_reports/pytest/iter7_results.xml"
+  ],
+  "action_items": [
+    "Fix ambiguity logic in /app/backend/routes/chat_routes.py around lines 596-604: when the top KB item's normalised title or question matches the english_query exactly (or query_coverage ≥ 0.8 against the top item), DO NOT force suggestions. Currently 'How to generate e-Way Bill Directly from Biziverse?' (verbatim title) is being downgraded to suggestions because a sibling KB item shares >60% score.",
+    "Optionally add DialogDescription to KnowledgeManagement ItemDialog, TrainedAnswers TrainedDialog, GeneralQuestions Add/Edit Dialog to silence the a11y console warning."
+  ],
+  "critical_code_review_comments": [
+    "chat_routes.py:604 — the boolean force_suggestions = (is_short_query OR is_ambiguous) is unsafe: a full-question query that matches one KB item verbatim should bypass ambiguity even if other KB items happen to share keywords. Recommend: top_query_coverage = overlap(top_item.title_words, query_words)/len(query_words); if top_query_coverage >= 0.8 AND max_score >= 4 → answer directly, skip force_suggestions.",
+    "chat_routes.py — same chat_routes.py file is now 794 lines (>700-line threshold). Suggest splitting suggestions/ambiguity helpers into a separate module (chat_matching.py).",
+    "AnswerPreview.js — clean, no _id leaks, properly typed defaults, good a11y on suggestion buttons (tabIndex=-1 so they don't steal focus from form). Only nit: 'buttons' resource rendering should also show URL/action hint on hover for admin clarity (cosmetic)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration7_test.py (new)"
+  ],
+  "success_rate": {
+    "backend": "86% (6/7 pytest — vague 'digital signature'/'biziverse'/'sales order'/'eway bill' → suggestions ✓, 'What is Biziverse?' → direct KB answer ✓, but 'How to generate e-Way Bill Directly from Biziverse?' incorrectly returns suggestions instead of direct answer ✗)",
+    "frontend": "100% (3/3 editor dialogs render data-testid='answer-preview' and live-render **bold** markdown — KB Items + Trained Answers + General Questions all confirmed via Playwright screenshots)"
+  },
+  "test_credentials": "admin@biziverse.com / Admin@123 (super_admin)",
+  "seed_data_creation": "Created a transient TEST_iter7 conversation per pytest module and deleted it via DELETE /api/chat/conversations/{id} in the cleanup test. KB is currently seeded with 10 items (not 5 as the test brief stated) — includes Recovery Amount, Digital Signature (Print/Upload single/multi-branch), e-Way Bill (Direct + JSON), e-Invoice for Sales, and a Sales Invoice item.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 7 is 95% green. ONLY remaining issue: the ambiguity heuristic in /app/backend/routes/chat_routes.py (lines 596-604) over-triggers for full-question queries whose top KB match is verbatim but has a sibling KB item with overlapping keywords. Re-running /app/backend/tests/iteration7_test.py after the fix should yield 7/7. KB seed grew from 5 → 10 items; if you reset KB to 5 items only the failing test may coincidentally pass because the JSON-Upload sibling would be gone. Don't rely on KB size — fix the heuristic. Frontend AnswerPreview is fully wired and verified — no retest needed for frontend.",
+  "rca of the issue": "Root cause: in send_message() the boolean `force_suggestions = (is_short_query or is_ambiguous) and enable_suggestions and len(suggestions) >= 2`. For 'How to generate e-Way Bill Directly from Biziverse?' (5 content words → is_short_query=False), is_ambiguous becomes True because the KB text-search returns TWO e-Way-Bill items with text-scores within 60% of each other (Direct + JSON-Upload). Therefore force_suggestions=True and the code enters the `if max_score < 4 or force_suggestions:` branch which returns SSE type='suggestions' instead of streaming the AI answer. Reproduce: POST /api/chat/conversations/{id}/messages {'content': 'How to generate e-Way Bill Directly from Biziverse?'} → events == [{type:'suggestions',questions:[...]},{type:'done',suggestions:[...]}] with ZERO token events. Mitigation (recommended): before computing is_ambiguous, check if the top item already matches the query verbatim (normalised title == english_query OR query_coverage of top item ≥ 0.8); if so, set is_ambiguous=False and let the high-confidence AI branch run."
+}

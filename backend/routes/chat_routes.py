@@ -592,6 +592,8 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
     # KB items match with similar confidence → show suggestions.
     # Prevents Astra from concatenating several KB items into one
     # mega-answer for vague queries like "digital signature".
+    # EXCEPTION: if the query matches the top KB item's title/question
+    # verbatim (≥80% word overlap), trust it and answer directly.
     # ════════════════════════════════════════════
     query_words = extract_content_words(english_query)
     is_short_query = len(query_words) <= 2
@@ -601,7 +603,23 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
     ) if max_score > 0 else 0
     is_ambiguous = similar_count >= 2
 
-    force_suggestions = (is_short_query or is_ambiguous) and enable_suggestions and len(suggestions) >= 2
+    # Does the top KB item's title/question match the user's query closely?
+    top_item = max(knowledge_items, key=lambda x: x.get("score", 0)) if knowledge_items else None
+    top_text_words = extract_content_words(
+        (top_item.get("question") or top_item.get("title", "")) if top_item else ""
+    )
+    top_query_coverage = (
+        len(query_words & top_text_words) / len(query_words)
+        if query_words and top_text_words else 0
+    )
+    is_verbatim_top_match = top_query_coverage >= 0.8 and len(query_words) >= 3
+
+    force_suggestions = (
+        (is_short_query or is_ambiguous)
+        and not is_verbatim_top_match
+        and enable_suggestions
+        and len(suggestions) >= 2
+    )
 
     # ════════════════════════════════════════════
     # BANK-LEVEL SAFETY: Score < 4 OR ambiguous → ALWAYS show suggestions

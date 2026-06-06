@@ -32,7 +32,11 @@ Astra is an AI-powered Knowledge Assistant for Biziverse users to quickly unders
 - Strict "Bank-level" chat: removed Creative/Natural modes; max_score < 4 → always show suggestions; AI uncertain → override with fallback/suggestions
 - General Questions: admin CRUD page + chat-side priority routing with buttons + suggestion_questions
 
-### Iteration 5 (June 4, 2026)
+### Iteration 7 (June 5, 2026)
+- **Bug fix — vague-query mega-answer:** When a user typed a short/ambiguous query (e.g., "digital signature", "biziverse", "eway bill"), Astra was concatenating ALL matching KB items into one giant answer. Fixed: queries with ≤2 content words OR multiple KB items within 60% of the top score → show top-3 KB questions as clickable suggestions instead. Exception: if the top KB item's title matches the query ≥80% verbatim (e.g., "How to generate e-Way Bill Directly from Biziverse?"), answer directly. Verified 5/5 cases.
+- **NEW Live Answer Preview** in all 3 admin editors (Knowledge Items, Trained Answers, General Questions). Reusable component `/app/frontend/src/components/AnswerPreview.js` renders the answer exactly as users see it in chat (markdown, numbered steps, suggestion buttons, action buttons, resource badges) — updates as you type.
+
+
 - **Removed Tickets** section from admin panel entirely (nav + route). User-side "Raise Support Ticket" fallback button preserved.
 - **Removed ticket icon** next to thumbs-up/thumbs-down in chat — only feedback thumbs now.
 - **Clickable Dashboard cards** — each stat card is a router Link: Helpful% → /admin/feedback?filter=helpful, Not Helpful% → /admin/feedback?filter=not_helpful, Total Questions → /admin/conversations, Active Users → /admin/users, Unanswered → /admin/gap-analysis, KB Items → /admin/knowledge.

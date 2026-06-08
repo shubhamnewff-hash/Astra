@@ -35,9 +35,35 @@ STOP_WORDS = frozenset({
 })
 
 
+def normalize_for_match(text: str) -> str:
+    """Aggressive normalization for verbatim suggestion-click matching."""
+    if not text:
+        return ""
+    # Lowercase, strip punctuation, collapse whitespace
+    s = re.sub(r"[^\w\s]", " ", text.lower())
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def extract_content_words(text: str) -> set:
-    """Extract meaningful content words, removing stop words."""
-    return set(w for w in text.lower().split() if w not in STOP_WORDS and len(w) > 1)
+    """Extract meaningful content words, removing stop words and punctuation."""
+    normalized = normalize_for_match(text)
+    return set(w for w in normalized.split() if w not in STOP_WORDS and len(w) > 1)
+
+
+async def find_exact_kb_match(query: str):
+    """If the user query EXACTLY matches a KB item's question or title (after normalization),
+    return that KB item — this is the direct suggestion-click path that bypasses LLM."""
+    norm_query = normalize_for_match(query)
+    if not norm_query or len(norm_query) < 6:
+        return None
+    items = await db.knowledge_items.find().to_list(2000)
+    for item in items:
+        for field in ("question", "title"):
+            val = item.get(field) or ""
+            if val and normalize_for_match(val) == norm_query:
+                return item
+    return None
 
 
 async def search_trained_answers(query: str):
@@ -195,19 +221,22 @@ def build_system_prompt(context: str, custom_prompt: str = "", fallback_message:
     return prompt + "\n\n" + context
 
 
-async def track_unanswered(query: str, user_id: str, conv_id: str):
+async def track_unanswered(query: str, user_id: str, conv_id: str, source: str = "fallback"):
+    """Track a query that Astra couldn't answer directly.
+    source: 'fallback' (no KB match), 'suggestion' (ambiguous, showed suggestions), 'ai_uncertain' (LLM said don't know)."""
     normalized = query.strip().lower()
     existing = await db.unanswered_questions.find_one({"normalized": normalized, "status": "pending"})
     if existing:
         await db.unanswered_questions.update_one(
             {"_id": existing["_id"]},
-            {"$inc": {"asked_count": 1}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+            {"$inc": {"asked_count": 1},
+             "$set": {"updated_at": datetime.now(timezone.utc), "conversation_id": conv_id, "last_source": source}},
         )
     else:
         await db.unanswered_questions.insert_one({
             "question": query.strip(), "normalized": normalized,
             "user_id": user_id, "conversation_id": conv_id,
-            "asked_count": 1, "status": "pending",
+            "asked_count": 1, "status": "pending", "last_source": source,
             "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
         })
 
@@ -498,6 +527,80 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # ════════════════════════════════════════════
+    # CONVERSATION CONTEXT: Load last few messages for context-aware queries
+    # When the current query is short/follow-up (e.g., "how to configure it"),
+    # we use prior user questions to enrich KB search.
+    # ════════════════════════════════════════════
+    prior_msgs = await db.messages.find({
+        "conversation_id": conv_id,
+        "role": "user",
+    }).sort("created_at", -1).limit(6).to_list(6)
+    # exclude the message we just inserted (latest one)
+    prior_user_msgs = [m.get("content", "") for m in prior_msgs[1:6]]
+    prior_user_msgs.reverse()  # chronological order
+
+    # Enrich short follow-up queries with previous topic for KB search
+    short_query_words = extract_content_words(english_query)
+    enriched_query = english_query
+    if len(short_query_words) <= 3 and prior_user_msgs:
+        # Pull the most recent prior message that has more content
+        for m in reversed(prior_user_msgs):
+            if len(extract_content_words(m)) > len(short_query_words):
+                enriched_query = f"{m} {english_query}"
+                logger.info(f"Context-enriched query: '{english_query}' → '{enriched_query[:100]}'")
+                break
+
+    # ════════════════════════════════════════════
+    # PRIORITY -1: EXACT KB MATCH (suggestion-click direct hit)
+    # If user clicks a suggestion or types a question verbatim from KB,
+    # serve the stored answer DIRECTLY — no LLM, no ambiguity check.
+    # ════════════════════════════════════════════
+    exact_item = await find_exact_kb_match(english_query)
+    if exact_item:
+        # Build the answer from explanation + steps
+        lines = []
+        if exact_item.get("explanation"):
+            lines.append(exact_item["explanation"].strip())
+        if exact_item.get("steps"):
+            lines.append("")
+            for i, s in enumerate(exact_item["steps"], 1):
+                lines.append(f"{i}. {s}")
+        if exact_item.get("suggestions"):
+            lines.append("")
+            lines.append("**Tips:** " + " | ".join(exact_item["suggestions"]))
+        answer = "\n".join(lines).strip() or exact_item.get("title", "")
+        answer_out = await t(answer)
+
+        # Collect attached resources
+        resource_refs = []
+        if exact_item.get("resource_ids"):
+            try:
+                rdocs = await db.resources.find(
+                    {"_id": {"$in": [ObjectId(rid) for rid in exact_item["resource_ids"]]}}
+                ).to_list(20)
+                for r in rdocs:
+                    resource_refs.append({"title": r.get("title", ""), "type": r.get("resource_type", "document"), "url": r.get("url", "")})
+            except Exception:
+                pass
+
+        msg_doc = {
+            "conversation_id": conv_id, "role": "assistant",
+            "content": answer_out, "has_knowledge": True,
+            "knowledge_item_ids": [str(exact_item["_id"])],
+            "resource_refs": resource_refs,
+            "source": "kb_direct", "confidence": 100,
+            "confidence_label": "KB Direct Match (100%)",
+            "language": user_lang,
+            "created_at": datetime.now(timezone.utc),
+        }
+        result = await db.messages.insert_one(msg_doc)
+        await update_title(body.content)
+        return make_sse([
+            {"type": "token", "content": answer_out},
+            {"type": "done", "message_id": str(result.inserted_id), "resources": resource_refs},
+        ])
+
+    # ════════════════════════════════════════════
     # PRIORITY 0: General Questions (greetings, non-KB)
     # ════════════════════════════════════════════
     general_q = await search_general_questions(english_query)
@@ -558,13 +661,13 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
         ])
 
     # ════════════════════════════════════════════
-    # PRIORITY 2: Search Knowledge Base
+    # PRIORITY 2: Search Knowledge Base (with conversation-context enrichment)
     # ════════════════════════════════════════════
-    knowledge_items, max_score = await search_knowledge_base(english_query)
+    knowledge_items, max_score = await search_knowledge_base(enriched_query)
 
     # NO MATCH → Fallback
     if not knowledge_items:
-        await track_unanswered(body.content, user["_id"], conv_id)
+        await track_unanswered(body.content, user["_id"], conv_id, source="fallback")
         fb_out = await t(fallback_message)
         msg_doc = {
             "conversation_id": conv_id, "role": "assistant",
@@ -627,6 +730,8 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
     # ════════════════════════════════════════════
     if max_score < 4 or force_suggestions:
         if suggestions:
+            # Track as unanswered so admin can see what's confusing Astra
+            await track_unanswered(body.content, user["_id"], conv_id, source="suggestion")
             suggestions_out = await tl(suggestions)
             sug_msg_out = await t(suggestion_message)
             msg_doc = {
@@ -645,7 +750,7 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
                 {"type": "done", "message_id": str(result.inserted_id), "resources": [], "suggestions": suggestions_out},
             ])
         else:
-            await track_unanswered(body.content, user["_id"], conv_id)
+            await track_unanswered(body.content, user["_id"], conv_id, source="fallback")
             fb_out = await t(fallback_message)
             msg_doc = {
                 "conversation_id": conv_id, "role": "assistant",
@@ -682,6 +787,11 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
                     resource_refs.append(ref)
 
     context = build_knowledge_context(top_items)
+    # Conversation context — helps LLM understand follow-up queries
+    convo_context = ""
+    if prior_user_msgs:
+        recent = prior_user_msgs[-4:]  # last 4 prior user messages
+        convo_context = "\n\nRECENT USER QUESTIONS IN THIS CONVERSATION (for context only — do NOT answer these):\n" + "\n".join(f"- {m}" for m in recent)
     # Tell AI to respond in user's language while sourcing only from English KB context
     lang_instruction = ""
     if user_lang != "en":
@@ -690,7 +800,7 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
             f"Respond ONLY in language '{user_lang}'. Preserve all markdown formatting "
             "(**bold**, numbered lists). Keep product names (Biziverse, GST, ERP) in English."
         )
-    system_prompt = build_system_prompt(context, custom_prompt, fallback_message) + lang_instruction
+    system_prompt = build_system_prompt(context, custom_prompt, fallback_message) + convo_context + lang_instruction
 
     async def ai_generator():
         full_response = ""
@@ -715,7 +825,7 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
 
         # POST-PROCESSING: If AI is uncertain → override with fallback/suggestions
         if is_uncertain_response(full_response, fallback_message):
-            await track_unanswered(body.content, user["_id"], conv_id)
+            await track_unanswered(body.content, user["_id"], conv_id, source="ai_uncertain")
             if suggestions:
                 suggestions_out = await tl(suggestions)
                 sug_msg_out = await t(suggestion_message)

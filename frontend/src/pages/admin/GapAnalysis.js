@@ -12,9 +12,11 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Check, X, Trash2, AlertCircle, CheckCircle, HelpCircle } from "lucide-react";
+import { Check, X, Trash2, AlertCircle, CheckCircle, HelpCircle, Eye } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 export default function GapAnalysis() {
+  const navigate = useNavigate();
   const [data, setData] = useState({ pending: [], added_to_kb: [] });
   const [modules, setModules] = useState([]);
   const [topics, setTopics] = useState([]);
@@ -141,22 +143,43 @@ export default function GapAnalysis() {
                         onCheckedChange={toggleAll} data-testid="select-all-unanswered" />
                     </TableHead>
                     <TableHead>Question</TableHead>
+                    <TableHead className="w-[140px]">Source</TableHead>
                     <TableHead className="w-[80px]">Asked</TableHead>
-                    <TableHead className="w-[140px]">Actions</TableHead>
+                    <TableHead className="w-[180px]">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {data.pending.map((q) => (
+                  {data.pending.map((q) => {
+                    const src = q.last_source || "fallback";
+                    const srcMeta = src === "suggestion"
+                      ? { label: "Ambiguous", color: "#F59E0B", bg: "#FFFBEB" }
+                      : src === "ai_uncertain"
+                      ? { label: "AI Uncertain", color: "#8B5CF6", bg: "#F5F3FF" }
+                      : { label: "No Match", color: "#EF4444", bg: "#FEE2E2" };
+                    return (
                     <TableRow key={q._id} data-testid={`unanswered-row-${q._id}`}>
                       <TableCell>
                         <Checkbox checked={selected.has(q._id)} onCheckedChange={() => toggleSelect(q._id)} />
                       </TableCell>
                       <TableCell className="font-medium" style={{ color: '#0A101D' }}>{q.question}</TableCell>
                       <TableCell>
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"
+                          style={{ color: srcMeta.color, background: srcMeta.bg }} data-testid={`gap-source-${q._id}`}>
+                          {srcMeta.label}
+                        </span>
+                      </TableCell>
+                      <TableCell>
                         <Badge variant="secondary" className="text-xs">{q.asked_count}x</Badge>
                       </TableCell>
                       <TableCell>
                         <div className="flex gap-1">
+                          {q.conversation_id && (
+                            <Button variant="ghost" size="sm" className="h-8 w-8 p-0"
+                              onClick={() => navigate(`/admin/conversations?open=${q.conversation_id}`)}
+                              title="View Conversation" data-testid={`view-conv-${q._id}`}>
+                              <Eye className="w-4 h-4 text-[#3B82F6]" />
+                            </Button>
+                          )}
                           <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => handleAccept(q)}
                             title="Add to Knowledge Base" data-testid={`accept-unanswered-${q._id}`}>
                             <Check className="w-4 h-4 text-[#10B981]" />
@@ -172,10 +195,10 @@ export default function GapAnalysis() {
                         </div>
                       </TableCell>
                     </TableRow>
-                  ))}
+                  );})}
                   {data.pending.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={4} className="text-center py-12 text-[#64748B]">
+                      <TableCell colSpan={5} className="text-center py-12 text-[#64748B]">
                         <CheckCircle className="w-8 h-8 mx-auto mb-2 text-[#10B981]" />
                         No unanswered questions! Your knowledge base is doing great.
                       </TableCell>

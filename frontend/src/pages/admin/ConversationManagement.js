@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -59,6 +60,8 @@ function ConfidenceBadge({ msg }) {
 }
 
 export default function ConversationManagement() {
+  const [searchParams] = useSearchParams();
+  const openId = searchParams.get("open");
   const [conversations, setConversations] = useState([]);
   const [tab, setTab] = useState("all");
   const [viewDialog, setViewDialog] = useState(null);
@@ -106,13 +109,20 @@ export default function ConversationManagement() {
     setBulkDeleting(false);
   };
 
-  const viewConversation = async (conv) => {
+  const viewConversation = useCallback(async (conv) => {
     try {
       const { data } = await api.get(`/admin/conversations/${conv._id}/messages`);
       setViewMessages(data.messages);
       setViewDialog(conv);
     } catch { toast.error("Failed to load messages"); }
-  };
+  }, []);
+
+  // Auto-open if ?open=<id> is in URL (e.g. from Knowledge Gaps "View Conversation")
+  useEffect(() => {
+    if (!openId || conversations.length === 0 || viewDialog) return;
+    const conv = conversations.find((c) => c._id === openId);
+    if (conv) viewConversation(conv);
+  }, [openId, conversations, viewDialog, viewConversation]);
 
   const filtered = tab === "all" ? conversations : conversations.filter((c) => (c.review_status || "pending") === tab);
 

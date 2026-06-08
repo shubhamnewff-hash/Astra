@@ -121,7 +121,11 @@ export default function ConversationManagement() {
   useEffect(() => {
     if (!openId || conversations.length === 0 || viewDialog) return;
     const conv = conversations.find((c) => c._id === openId);
-    if (conv) viewConversation(conv);
+    if (conv) {
+      viewConversation(conv);
+    } else {
+      toast.error("This conversation no longer exists (may have been deleted)");
+    }
   }, [openId, conversations, viewDialog, viewConversation]);
 
   const filtered = tab === "all" ? conversations : conversations.filter((c) => (c.review_status || "pending") === tab);

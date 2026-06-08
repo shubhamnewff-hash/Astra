@@ -32,7 +32,14 @@ Astra is an AI-powered Knowledge Assistant for Biziverse users to quickly unders
 - Strict "Bank-level" chat: removed Creative/Natural modes; max_score < 4 → always show suggestions; AI uncertain → override with fallback/suggestions
 - General Questions: admin CRUD page + chat-side priority routing with buttons + suggestion_questions
 
-### Iteration 7 (June 5, 2026)
+### Iteration 8 (June 8, 2026)
+- **Bug fix — suggestion-click loop:** Clicking a suggested KB question (e.g., "How to Add Extra Charges bbefore GST?") was triggering the full pipeline again → recursive suggestions. Added a PRIORITY -1 direct-serve path (`find_exact_kb_match` using `normalize_for_match`) that bypasses LLM/ambiguity and serves the KB item's stored explanation+steps when the user query matches a KB question verbatim. Source = `kb_direct`, confidence = 100.
+- **Bug fix — zero conversation context:** Short follow-ups like "how to do it" used to get fallback. Fixed: loads last 5 prior user messages; enriches short queries (≤3 content words) with the most recent meaningful prior message for KB search; passes the last 4 prior user questions to the LLM in system_prompt.
+- **Bug fix — gap tracking blind to ambiguity:** Queries that triggered suggestions or "AI uncertain" weren't reaching Knowledge Gaps. Fixed: `track_unanswered` now persists `last_source` ('suggestion'/'ai_uncertain'/'fallback') and `conversation_id` on every gap. Admin → Gap Analysis shows a color-coded Source badge per row (Ambiguous orange / AI Uncertain purple / No Match red) + an Eye icon to jump to `/admin/conversations?open=<id>` which auto-opens the conversation dialog.
+- **Bug fix — typo auto-correction:** Language detector was silently typo-fixing ASCII-English queries, causing find_exact_kb_match to miss verbatim KB items containing typos. Added explicit short-circuit: ASCII-dominant queries <80 chars now skip the LLM detector and preserve verbatim text.
+- Backend: 8/8 pytest. Frontend: Gap source badges + Eye buttons + auto-open dialog verified.
+
+
 - **Bug fix — vague-query mega-answer:** When a user typed a short/ambiguous query (e.g., "digital signature", "biziverse", "eway bill"), Astra was concatenating ALL matching KB items into one giant answer. Fixed: queries with ≤2 content words OR multiple KB items within 60% of the top score → show top-3 KB questions as clickable suggestions instead. Exception: if the top KB item's title matches the query ≥80% verbatim (e.g., "How to generate e-Way Bill Directly from Biziverse?"), answer directly. Verified 5/5 cases.
 - **NEW Live Answer Preview** in all 3 admin editors (Knowledge Items, Trained Answers, General Questions). Reusable component `/app/frontend/src/components/AnswerPreview.js` renders the answer exactly as users see it in chat (markdown, numbered steps, suggestion buttons, action buttons, resource badges) — updates as you type.
 

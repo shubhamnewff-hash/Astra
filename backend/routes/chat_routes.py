@@ -250,12 +250,13 @@ async def detect_and_translate(text: str, api_key: str, provider: str = "openai"
     if not stripped:
         return ("en", stripped)
 
-    # Quick ASCII heuristic — if 95%+ ASCII and short, assume English (skip LLM call)
+    # Quick ASCII heuristic — if 95%+ ASCII and short (<80 chars), it's almost
+    # certainly English. Short-circuit the LLM call to (a) save tokens and (b)
+    # preserve verbatim text including typos so suggestion-click direct-serve
+    # via find_exact_kb_match() still matches.
     ascii_chars = sum(1 for c in stripped if ord(c) < 128)
     if len(stripped) < 80 and ascii_chars / max(len(stripped), 1) > 0.95:
-        # Could still be romanized Hindi etc. Use LLM only if longer.
-        # For very short ASCII (likely English), skip.
-        pass
+        return ("en", stripped)
 
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage

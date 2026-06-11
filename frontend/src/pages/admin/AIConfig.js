@@ -16,6 +16,7 @@ export default function AIConfig() {
     fallback_message: "", fallback_button_text: "", fallback_button_link: "", show_raise_ticket: true,
     enable_suggestions: true, max_suggestions: 3, suggestion_message: "",
     suggested_questions: [], random_suggestions: true, suggestion_modules: [], multilingual: true, max_user_conversations: 25,
+    use_ai_router: true, scope_fallback_message: "", enabled_module_labels: [],
   });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -42,6 +43,9 @@ export default function AIConfig() {
         suggestion_modules: data.suggestion_modules || [],
         multilingual: data.multilingual !== false,
         max_user_conversations: data.max_user_conversations || 25,
+        use_ai_router: data.use_ai_router !== false,
+        scope_fallback_message: data.scope_fallback_message || "",
+        enabled_module_labels: data.enabled_module_labels || [],
       }));
     api.get("/knowledge/modules").then(({ data }) => setModules(data)).catch(() => {});
   }, []);
@@ -240,7 +244,22 @@ export default function AIConfig() {
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            <div className="md:col-span-2"><Label>Fallback Message</Label><Textarea value={config.fallback_message} onChange={(e) => setConfig(p => ({ ...p, fallback_message: e.target.value }))} className="mt-1.5 min-h-[60px]" /></div>
+            <div className="md:col-span-2"><Label>Default Fallback Message</Label><Textarea value={config.fallback_message} onChange={(e) => setConfig(p => ({ ...p, fallback_message: e.target.value }))} className="mt-1.5 min-h-[60px]" data-testid="default-fallback-input" /><p className="text-xs mt-1.5" style={{ color: '#64748B' }}>Shown when AI can't find an answer within a topic it IS trained on.</p></div>
+            <div className="md:col-span-2">
+              <Label>Out-of-Scope Fallback Message <span className="text-xs font-normal" style={{ color: '#94A3B8' }}>(shown when user asks about untrained topics)</span></Label>
+              <Textarea value={config.scope_fallback_message}
+                onChange={(e) => setConfig(p => ({ ...p, scope_fallback_message: e.target.value }))}
+                className="mt-1.5 min-h-[60px]" data-testid="scope-fallback-input"
+                placeholder="I'm currently trained only on: {modules}. Please ask about these topics." />
+              <p className="text-xs mt-1.5" style={{ color: '#64748B' }}>Use <code className="text-[#FF6B00]">{"{modules}"}</code> to auto-insert your trained module list. Leave blank to use the default fallback.</p>
+            </div>
+            <div className="md:col-span-2">
+              <Label>Trained Modules <span className="text-xs font-normal" style={{ color: '#94A3B8' }}>(comma-separated labels for the out-of-scope message)</span></Label>
+              <Input value={(config.enabled_module_labels || []).join(", ")}
+                onChange={(e) => setConfig(p => ({ ...p, enabled_module_labels: e.target.value.split(",").map(s => s.trim()).filter(Boolean) }))}
+                className="mt-1.5" data-testid="enabled-modules-input"
+                placeholder="e.g., Sales Invoices, GST, Recovery Management" />
+            </div>
             <div className="flex items-center gap-3">
               <Switch checked={config.show_raise_ticket}
                 onCheckedChange={(v) => setConfig(p => ({ ...p, show_raise_ticket: v }))} />
@@ -248,6 +267,27 @@ export default function AIConfig() {
             </div>
             <div><Label>Ticket Button Text</Label><Input value={config.fallback_button_text} onChange={(e) => setConfig(p => ({ ...p, fallback_button_text: e.target.value }))} className="mt-1.5" /></div>
             <div><Label>Ticket Button Link</Label><Input value={config.fallback_button_link} onChange={(e) => setConfig(p => ({ ...p, fallback_button_link: e.target.value }))} className="mt-1.5" placeholder="https://..." /></div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* AI Router */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-lg">AI Semantic Router</CardTitle>
+          <CardDescription>Smarter context-aware suggestions powered by gpt-5.2 (recommended)</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3" data-testid="ai-router-toggle">
+            <Switch checked={config.use_ai_router}
+              onCheckedChange={(v) => setConfig(p => ({ ...p, use_ai_router: v }))} />
+            <div>
+              <Label>Enable AI semantic router</Label>
+              <p className="text-xs mt-0.5" style={{ color: '#64748B' }}>
+                Uses the LLM to understand user intent — picks the best KB items even when keywords don't overlap
+                (e.g., "dynamic qr" → "Amount-Based QR"). Falls back to keyword matching if the LLM fails.
+              </p>
+            </div>
           </div>
         </CardContent>
       </Card>

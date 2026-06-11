@@ -1,0 +1,52 @@
+{
+  "summary": "Iteration 9 testing complete. Backend pytest 10/10 PASS — AI Semantic Router (gpt-5.2) end-to-end verified: (1) 'dynamic qr' → semantic suggestions list contains QR/UPI KB items (source=ai_router_suggestion); (2) 'how to bake a chocolate cake' with scope_fallback_message='I only know about {modules}...' and enabled_module_labels=['Sales Invoices','GST'] → SSE fallback with {modules} replaced by 'Sales Invoices, GST', stored as source=scope_fallback; (3) verbatim 'How to Configure Amount-Based QR Code ?' → direct-serve (source ∈ {ai_router_direct, kb_direct}, conf ≥ 90, no suggestions, full markdown token); (4) PUT /api/admin/ai-config {use_ai_router:false} disables router (OOS query no longer hits scope_fallback path); (5) smart-gap pending_resolution rows NOT visible in /api/admin/unanswered; (6) clicking verbatim suggestion deletes pending_resolution; (7) OOS still creates visible source='fallback' pending row; (8) /api/admin/users excludes role∈{user,end_user} (verified only super_admin+support_manager returned, total=2); (9) POST /api/auth/google/session: 400 on missing session_id, 401/500 on invalid. Frontend verified: AI Config card shows all 4 testids (ai-router-toggle, default-fallback-input, scope-fallback-input, enabled-modules-input); AuthCallback renders for /#session_id=<id>, redirects to /login on failure; Admin Users page shows only Super Admin + Support Manager (no end-users). NOTABLE BUG: Google login button is rendered ONLY on the Create Account (Register) tab in LoginPage.js — missing on the Sign In tab. Review request explicitly states 'Google G logo on both Sign In and Create Account tabs'.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "LoginPage.js (Sign In tab)",
+        "issue": "Google 'Continue with Google' button (data-testid='google-login-button') is rendered ONLY inside <TabsContent value='register'> via <GoogleButton />. The <TabsContent value='login'> contains the email/password form but NO GoogleButton component. Per review spec, both tabs must show the Google button. Fix: insert <GoogleButton /> immediately after the 'Welcome back' header div inside the login TabsContent (LoginPage.js, around line 139 — between </div> of header and <form onSubmit={handleLogin}>).",
+        "selector": "[data-testid='google-login-button']",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "AuthCallback failure redirect",
+        "issue": "Visiting /#session_id=fake correctly renders <auth-callback> and on POST /api/auth/google/session failure calls navigate('/login?error=google-failed'). However in the test the final URL was https://.../login (no '?error=google-failed' query string). This is likely because the React Router replace happened but the query persisted only in the history state. Functionally not blocking — fallback page still loads — but the LoginPage cannot show a 'Google sign-in failed' notice. Suggest adding a useSearchParams hook in LoginPage to surface error=google-failed as a toast/banner.",
+        "affected_selectors": ["[data-testid='auth-callback']"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration9_test.py",
+    "/app/test_reports/pytest/iter9_results.xml"
+  ],
+  "action_items": [
+    "Add <GoogleButton /> to the Sign In TabsContent in /app/frontend/src/pages/LoginPage.js (currently only on Create Account tab). Reuse the existing GoogleButton component defined at lines 57–75; insert above <form onSubmit={handleLogin}> at around line 140.",
+    "(Optional) Surface ?error=google-failed in LoginPage as a visible toast/error so users know why they bounced back."
+  ],
+  "critical_code_review_comments": [
+    "chat_routes.py is now 1200 lines (>700 threshold). Already flagged in iter8 — strongly recommend extracting ai_semantic_route, find_exact_kb_match, normalize_for_match, track_unanswered, search_*, and the 4 router branches into ai_router.py / chat_matching.py modules. The router branches (PRIORITY 0a-i … 0a-iv) at lines 733–882 alone are ~150 LOC of duplicated 'build answer / translate / insert msg / make_sse' logic — extract to a helper.",
+    "LoginPage.js: GoogleButton is defined inside the LoginPage component on every render — extract to module scope or wrap in useMemo to avoid re-creating the function/JSX tree on each keystroke.",
+    "auth_routes.py google_session endpoint: hardcodes the Emergent OAuth URL inside the function. While the comment says 'don't hardcode' (referring to redirect URLs), this is the correct fixed external endpoint — OK. But returning the raw Emergent error body in HTTPException(401, f'Google auth failed: {r.text[:200]}') may leak provider internals to clients; consider a generic 'Google authentication failed' message.",
+    "admin_routes.list_users uses {'role': {'$nin': ['user','end_user']}} — correctly hides end users. Good. Suggest indexing db.users on 'role' if user table grows."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration9_test.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (10/10 pytest pass — router semantic, router OOS+module substitution, router direct-serve, toggle off, gap hidden, gap cleanup, gap OOS visible, users filter, google session 400, google session invalid)",
+    "frontend": "90% (AI Config card 4/4 testids present; AuthCallback renders+redirects; Admin Users filter works; Google button works on Register tab → navigates to auth.emergentagent.com with redirect param. -10%: Google button MISSING from Sign In tab — spec violation)"
+  },
+  "test_credentials": "admin@biziverse.com / Admin@123 (super_admin)",
+  "seed_data_creation": "Transient TEST_iter9_* conversations created per test, cleaned up via DELETE. Also temporarily set ai_config {use_ai_router:true, scope_fallback_message:'I only know about {modules}. Please ask me about these topics.', enabled_module_labels:['Sales Invoices','GST']} via PUT /api/admin/ai-config — restored to original at module teardown.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 9 backend AI router is solid (10/10 pass). The only frontend gap is the missing GoogleButton on Sign In tab — once fixed, just verify the button appears on both tabs and clicks navigate to auth.emergentagent.com. KB still has ~88 items; the verbatim 'How to Configure Amount-Based QR Code ?' and similar QR/UPI titles direct-serve cleanly with the AI router. ai_config now persists use_ai_router/scope_fallback_message/enabled_module_labels keys. Pending_resolution rows are properly excluded from /api/admin/unanswered and auto-deleted when user clicks a suggestion that direct-serves. Some legacy 'pending' gaps from iter8 still exist — those are not regressions.",
+  "rca of the issue": "Bug: 'Continue with Google' button missing from Sign In tab of /login. RCA: LoginPage.js lines 135–168 (<TabsContent value='login'>) contain the email/password form but never invoke <GoogleButton />. The component <GoogleButton /> is only rendered inside <TabsContent value='register'> at line 175. Reproduce: open /login (default tab is Sign In) → no Google button visible. Switch to Create Account tab → Google button appears. Mitigation: insert <GoogleButton /> right before the <form onSubmit={handleLogin}> (i.e. between line 139 and 140) — mirrors the placement in the register tab."
+}

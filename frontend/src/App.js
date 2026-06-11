@@ -1,8 +1,9 @@
 import "@/App.css";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { Toaster } from "@/components/ui/sonner";
 import LoginPage from "@/pages/LoginPage";
+import AuthCallback from "@/pages/AuthCallback";
 import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
 import ResetPasswordPage from "@/pages/ResetPasswordPage";
 import UserPortal from "@/pages/UserPortal";
@@ -41,6 +42,13 @@ function ProtectedRoute({ children, adminOnly = false }) {
 
 function AppRoutes() {
   const { user, loading } = useAuth();
+  const location = useLocation();
+
+  // Handle Emergent Google OAuth callback (URL fragment) — must run BEFORE
+  // ProtectedRoute / /auth/me checks to avoid race conditions.
+  if (location.hash?.includes("session_id=")) {
+    return <AuthCallback />;
+  }
 
   if (loading) {
     return (

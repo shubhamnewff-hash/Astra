@@ -177,6 +177,9 @@ class AIConfigUpdate(BaseModel):
     random_suggestions: Optional[bool] = None  # random from most answered KB
     multilingual: Optional[bool] = None  # auto detect & translate user language
     max_user_conversations: Optional[int] = None  # latest N convs visible per user (older auto-deleted)
+    use_ai_router: Optional[bool] = None  # use AI to semantically rank suggestions instead of keyword matching
+    scope_fallback_message: Optional[str] = None  # shown when user asks outside trained modules
+    enabled_module_labels: Optional[List[str]] = None  # labels of modules AI is currently trained on (e.g. ["Sales Invoices", "GST"])
 
 
 # ── Password Reset ──

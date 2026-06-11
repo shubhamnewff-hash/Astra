@@ -221,22 +221,34 @@ def build_system_prompt(context: str, custom_prompt: str = "", fallback_message:
     return prompt + "\n\n" + context
 
 
-async def track_unanswered(query: str, user_id: str, conv_id: str, source: str = "fallback"):
+async def track_unanswered(query: str, user_id: str, conv_id: str, source: str = "fallback", pending_resolution: bool = False):
     """Track a query that Astra couldn't answer directly.
-    source: 'fallback' (no KB match), 'suggestion' (ambiguous, showed suggestions), 'ai_uncertain' (LLM said don't know)."""
+    source: 'fallback' (no KB match), 'suggestion' (ambiguous, showed suggestions), 'ai_uncertain' (LLM said don't know).
+    pending_resolution: if True, status='pending_resolution' (will be cleaned up if user clicks a suggestion in same conv).
+    """
     normalized = query.strip().lower()
-    existing = await db.unanswered_questions.find_one({"normalized": normalized, "status": "pending"})
+    status = "pending_resolution" if pending_resolution else "pending"
+    existing = await db.unanswered_questions.find_one({
+        "normalized": normalized,
+        "status": {"$in": ["pending", "pending_resolution"]},
+    })
     if existing:
+        new_status = existing.get("status", "pending")
+        # Don't downgrade a real 'pending' gap back to 'pending_resolution'
+        if existing.get("status") == "pending_resolution" and not pending_resolution:
+            new_status = "pending"
         await db.unanswered_questions.update_one(
             {"_id": existing["_id"]},
             {"$inc": {"asked_count": 1},
-             "$set": {"updated_at": datetime.now(timezone.utc), "conversation_id": conv_id, "last_source": source}},
+             "$set": {"updated_at": datetime.now(timezone.utc),
+                      "conversation_id": conv_id, "last_source": source,
+                      "status": new_status}},
         )
     else:
         await db.unanswered_questions.insert_one({
             "question": query.strip(), "normalized": normalized,
             "user_id": user_id, "conversation_id": conv_id,
-            "asked_count": 1, "status": "pending", "last_source": source,
+            "asked_count": 1, "status": status, "last_source": source,
             "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
         })
 
@@ -352,6 +364,106 @@ async def translate_list(items: list, target_lang: str, api_key: str, provider: 
     except Exception as e:
         logger.warning(f"List translation failed: {e}")
         return items
+
+
+async def ai_semantic_route(
+    query: str,
+    prior_msgs: list,
+    api_key: str,
+    provider: str = "openai",
+    model: str = "gpt-5.2",
+) -> dict:
+    """Use the LLM as a semantic router. Given the user query + conversation history,
+    rank all KB items + general-question patterns by semantic intent match (NOT keyword match).
+    Returns: {
+      "intent": "kb" | "general" | "out_of_scope",
+      "top_kb_ids": [...],           # ordered list of KB item _ids (most relevant first, up to 3)
+      "top_general_id": "..."|None,  # general_question _id if intent=='general'
+      "confidence": 0-100,           # confidence in the TOP suggestion
+      "direct_serve": True|False,    # True if confidence is high enough to skip suggestions
+    }
+    On ANY failure → returns {"intent": "kb", "top_kb_ids": [], "top_general_id": None, "confidence": 0, "direct_serve": False}
+    so the caller can fall back to the keyword pipeline.
+    """
+    if not query or not api_key:
+        return {"intent": "kb", "top_kb_ids": [], "top_general_id": None, "confidence": 0, "direct_serve": False}
+
+    # Gather catalog (lightweight metadata only — id + question/title/triggers)
+    kb_docs = await db.knowledge_items.find(
+        {}, {"_id": 1, "question": 1, "title": 1}
+    ).limit(500).to_list(500)
+    gq_docs = await db.general_questions.find(
+        {"active": {"$ne": False}}, {"_id": 1, "triggers": 1, "response": 1}
+    ).limit(200).to_list(200)
+
+    kb_lines = []
+    for k in kb_docs:
+        q = (k.get("question") or k.get("title") or "").strip()
+        if q:
+            kb_lines.append(f"KB-{str(k['_id'])}: {q}")
+    gq_lines = []
+    for g in gq_docs:
+        triggers = g.get("triggers") or []
+        sample = (g.get("response") or "")[:60].replace("\n", " ")
+        if triggers:
+            gq_lines.append(f"GEN-{str(g['_id'])}: triggers={triggers!r} sample={sample!r}")
+
+    if not kb_lines and not gq_lines:
+        return {"intent": "kb", "top_kb_ids": [], "top_general_id": None, "confidence": 0, "direct_serve": False}
+
+    history = ""
+    if prior_msgs:
+        recent = prior_msgs[-4:]
+        history = "Prior user questions in this conversation:\n" + "\n".join(f"- {m}" for m in recent) + "\n\n"
+
+    catalog = "KNOWLEDGE BASE QUESTIONS:\n" + "\n".join(kb_lines)
+    if gq_lines:
+        catalog += "\n\nGENERAL QUESTIONS:\n" + "\n".join(gq_lines)
+
+    system = (
+        "You are Astra's semantic router. The user has asked a question. "
+        "Pick the most semantically relevant items from the catalog — understand INTENT, not keywords. "
+        "Use conversation history to disambiguate vague follow-ups (e.g. 'how to do it' refers to the previous topic). "
+        "If the user query is a greeting, chitchat, or clearly out of scope of the KB → intent='general' (if a GEN trigger matches) or 'out_of_scope'. "
+        "If the user query is clearly answered by ONE specific KB item with no ambiguity → set direct_serve=true and confidence>=90. "
+        "If multiple KB items are similarly relevant, list them in top_kb_ids (best first, max 3) with confidence in 40-85 range. "
+        "Respond ONLY with this JSON schema (no markdown, no explanation):\n"
+        '{"intent":"kb"|"general"|"out_of_scope","top_kb_ids":["<id>",...],"top_general_id":"<id>"|null,"confidence":<int 0-100>,"direct_serve":<bool>}'
+    )
+    user_msg = f"{history}USER QUERY: {query}\n\n{catalog}"
+
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"astra-router-{datetime.now(timezone.utc).timestamp()}",
+            system_message=system,
+        )
+        chat.with_model(provider, model)
+        resp = await chat.send_message(UserMessage(text=user_msg))
+        raw = (resp or "").strip()
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            return {"intent": "kb", "top_kb_ids": [], "top_general_id": None, "confidence": 0, "direct_serve": False}
+        data = json.loads(m.group(0))
+
+        # Clean up KB IDs (strip 'KB-' prefix if model included it)
+        kb_ids = data.get("top_kb_ids") or []
+        kb_ids = [str(i).replace("KB-", "").strip() for i in kb_ids if i]
+        gen_id = data.get("top_general_id")
+        if gen_id:
+            gen_id = str(gen_id).replace("GEN-", "").strip() or None
+
+        return {
+            "intent": data.get("intent", "kb"),
+            "top_kb_ids": kb_ids[:3],
+            "top_general_id": gen_id,
+            "confidence": int(data.get("confidence", 0) or 0),
+            "direct_serve": bool(data.get("direct_serve", False)),
+        }
+    except Exception as e:
+        logger.warning(f"AI router failed: {e}")
+        return {"intent": "kb", "top_kb_ids": [], "top_general_id": None, "confidence": 0, "direct_serve": False}
 
 
 def is_uncertain_response(text: str, fallback_message: str) -> bool:
@@ -596,13 +708,179 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
         }
         result = await db.messages.insert_one(msg_doc)
         await update_title(body.content)
+        # Clean up any prior pending_resolution gap from this conversation —
+        # the user clicked a suggestion and got an answer.
+        await db.unanswered_questions.delete_many({
+            "conversation_id": conv_id,
+            "status": "pending_resolution",
+        })
         return make_sse([
             {"type": "token", "content": answer_out},
             {"type": "done", "message_id": str(result.inserted_id), "resources": resource_refs},
         ])
 
     # ════════════════════════════════════════════
-    # PRIORITY 0: General Questions (greetings, non-KB)
+    # PRIORITY 0a: AI SEMANTIC ROUTER
+    # Use LLM to understand INTENT (not keywords) and rank suggestions.
+    # Falls through to keyword pipeline on any failure.
+    # ════════════════════════════════════════════
+    use_ai_router = ai_config.get("use_ai_router", True)
+    router = None
+    if use_ai_router and api_key:
+        router = await ai_semantic_route(english_query, prior_user_msgs, api_key, provider, model)
+        logger.info(f"AI router → intent={router['intent']} conf={router['confidence']} direct={router['direct_serve']} kb_ids={router['top_kb_ids'][:3]}")
+
+    # 0a-i: General Question chosen by AI router
+    if router and router["intent"] == "general" and router["top_general_id"]:
+        try:
+            gq = await db.general_questions.find_one({"_id": ObjectId(router["top_general_id"])})
+        except Exception:
+            gq = None
+        if gq:
+            answer = gq.get("response", "")
+            buttons = gq.get("buttons", [])
+            suggestion_qs = gq.get("suggestion_questions", [])
+            answer_out = await t(answer)
+            buttons_out = buttons
+            if user_lang != "en" and buttons:
+                labels = [b.get("label", "") for b in buttons]
+                translated_labels = await tl(labels)
+                buttons_out = [{**b, "label": translated_labels[i] if i < len(translated_labels) else b.get("label", "")} for i, b in enumerate(buttons)]
+            suggestion_qs_out = await tl(suggestion_qs) if suggestion_qs else suggestion_qs
+            msg_doc = {
+                "conversation_id": conv_id, "role": "assistant",
+                "content": answer_out, "has_knowledge": True,
+                "source": "general_question_ai", "confidence": router["confidence"],
+                "confidence_label": f"General Question (AI matched, {router['confidence']}%)",
+                "language": user_lang, "buttons": buttons_out, "suggestions": suggestion_qs_out,
+                "created_at": datetime.now(timezone.utc),
+            }
+            result = await db.messages.insert_one(msg_doc)
+            await update_title(body.content)
+            events = [{"type": "token", "content": answer_out}]
+            done_data = {"type": "done", "message_id": str(result.inserted_id), "resources": []}
+            if buttons_out: done_data["buttons"] = buttons_out
+            if suggestion_qs_out: done_data["suggestions"] = suggestion_qs_out
+            events.append(done_data)
+            return make_sse(events)
+
+    # 0a-ii: Out-of-scope → module-scope fallback
+    if router and router["intent"] == "out_of_scope":
+        scope_msg = ai_config.get("scope_fallback_message", "").strip()
+        enabled_labels = ai_config.get("enabled_module_labels") or []
+        if scope_msg:
+            if "{modules}" in scope_msg and enabled_labels:
+                scope_msg = scope_msg.replace("{modules}", ", ".join(enabled_labels))
+            final_msg = scope_msg
+        elif enabled_labels:
+            final_msg = f"I'm currently trained only on: **{', '.join(enabled_labels)}**. Please ask about these topics."
+        else:
+            final_msg = fallback_message
+        await track_unanswered(body.content, user["_id"], conv_id, source="fallback")
+        fb_out = await t(final_msg)
+        msg_doc = {
+            "conversation_id": conv_id, "role": "assistant",
+            "content": fb_out, "has_knowledge": False,
+            "source": "scope_fallback", "confidence": 0,
+            "confidence_label": "Out of Scope",
+            "language": user_lang,
+            "created_at": datetime.now(timezone.utc),
+        }
+        result = await db.messages.insert_one(msg_doc)
+        await update_title(body.content)
+        return make_sse([
+            {"type": "fallback", "message": fb_out},
+            {"type": "done", "message_id": str(result.inserted_id), "resources": [],
+             "fallback": {"show": True, "message": fb_out, "button_text": fallback_button_text,
+                          "button_link": fallback_button_link, "show_raise_ticket": show_raise_ticket}},
+        ])
+
+    # 0a-iii: KB direct-serve (AI router is 90%+ confident on one item)
+    if router and router["intent"] == "kb" and router["direct_serve"] and router["confidence"] >= 90 and router["top_kb_ids"]:
+        try:
+            top_id = router["top_kb_ids"][0]
+            kb_item = await db.knowledge_items.find_one({"_id": ObjectId(top_id)})
+        except Exception:
+            kb_item = None
+        if kb_item:
+            # Build answer from explanation + steps (same as exact-match)
+            lines = []
+            if kb_item.get("explanation"):
+                lines.append(kb_item["explanation"].strip())
+            if kb_item.get("steps"):
+                lines.append("")
+                for i, s in enumerate(kb_item["steps"], 1):
+                    lines.append(f"{i}. {s}")
+            if kb_item.get("suggestions"):
+                lines.append("")
+                lines.append("**Tips:** " + " | ".join(kb_item["suggestions"]))
+            answer = "\n".join(lines).strip() or kb_item.get("title", "")
+            answer_out = await t(answer)
+            resource_refs = []
+            if kb_item.get("resource_ids"):
+                try:
+                    rdocs = await db.resources.find({"_id": {"$in": [ObjectId(rid) for rid in kb_item["resource_ids"]]}}).to_list(20)
+                    for r in rdocs:
+                        resource_refs.append({"title": r.get("title", ""), "type": r.get("resource_type", "document"), "url": r.get("url", "")})
+                except Exception:
+                    pass
+            msg_doc = {
+                "conversation_id": conv_id, "role": "assistant",
+                "content": answer_out, "has_knowledge": True,
+                "knowledge_item_ids": [str(kb_item["_id"])],
+                "resource_refs": resource_refs,
+                "source": "ai_router_direct", "confidence": router["confidence"],
+                "confidence_label": f"AI Router Direct ({router['confidence']}%)",
+                "language": user_lang,
+                "created_at": datetime.now(timezone.utc),
+            }
+            result = await db.messages.insert_one(msg_doc)
+            await update_title(body.content)
+            await db.unanswered_questions.delete_many({"conversation_id": conv_id, "status": "pending_resolution"})
+            return make_sse([
+                {"type": "token", "content": answer_out},
+                {"type": "done", "message_id": str(result.inserted_id), "resources": resource_refs},
+            ])
+
+    # 0a-iv: KB suggestions (AI router ranked multiple items)
+    if router and router["intent"] == "kb" and router["top_kb_ids"] and len(router["top_kb_ids"]) >= 1 and enable_suggestions:
+        try:
+            top_oids = [ObjectId(i) for i in router["top_kb_ids"][:max_suggestions]]
+        except Exception:
+            top_oids = []
+        if top_oids:
+            kb_items = await db.knowledge_items.find({"_id": {"$in": top_oids}}).to_list(max_suggestions)
+            # Preserve router's order
+            id_to_item = {str(it["_id"]): it for it in kb_items}
+            ordered = [id_to_item[i] for i in router["top_kb_ids"][:max_suggestions] if i in id_to_item]
+            ai_suggestions = [(it.get("question") or it.get("title", "")).strip() for it in ordered if (it.get("question") or it.get("title"))]
+            if len(ai_suggestions) >= 1:
+                # Track as PENDING RESOLUTION — will be cleaned up if user clicks one
+                await track_unanswered(body.content, user["_id"], conv_id, source="suggestion", pending_resolution=True)
+                suggestions_out = await tl(ai_suggestions)
+                sug_msg_out = await t(suggestion_message)
+                msg_doc = {
+                    "conversation_id": conv_id, "role": "assistant",
+                    "content": sug_msg_out, "suggestions": suggestions_out,
+                    "has_knowledge": False, "source": "ai_router_suggestion",
+                    "confidence": router["confidence"],
+                    "confidence_label": f"AI Router Suggestions ({router['confidence']}%)",
+                    "language": user_lang,
+                    "created_at": datetime.now(timezone.utc),
+                }
+                result = await db.messages.insert_one(msg_doc)
+                await update_title(body.content)
+                return make_sse([
+                    {"type": "suggestions", "questions": suggestions_out, "message": sug_msg_out},
+                    {"type": "done", "message_id": str(result.inserted_id), "resources": [], "suggestions": suggestions_out},
+                ])
+
+    # ════════════════════════════════════════════
+    # FALLBACK PIPELINE (keyword-based) — only reached if AI router failed/empty
+    # ════════════════════════════════════════════
+
+    # ════════════════════════════════════════════
+    # PRIORITY 0: General Questions (greetings, non-KB) — KEYWORD fallback
     # ════════════════════════════════════════════
     general_q = await search_general_questions(english_query)
     if general_q:
@@ -732,7 +1010,7 @@ async def send_message(conv_id: str, body: MessageCreate, request: Request):
     if max_score < 4 or force_suggestions:
         if suggestions:
             # Track as unanswered so admin can see what's confusing Astra
-            await track_unanswered(body.content, user["_id"], conv_id, source="suggestion")
+            await track_unanswered(body.content, user["_id"], conv_id, source="suggestion", pending_resolution=True)
             suggestions_out = await tl(suggestions)
             sug_msg_out = await t(suggestion_message)
             msg_doc = {

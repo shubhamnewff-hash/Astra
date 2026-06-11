@@ -174,3 +174,70 @@ async def reset_password(body: ResetPasswordRequest):
         {"$set": {"used": True}},
     )
     return {"message": "Password has been reset successfully"}
+
+
+# ── Google OAuth via Emergent ──
+# REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+@router.post("/google/session")
+async def google_session(request: Request, response: Response):
+    """Exchange an Emergent OAuth session_id for our JWT auth tokens.
+    Creates a new user (role='user') if first-time Google sign-in, or links to existing email."""
+    import httpx
+    body = await request.json()
+    session_id = body.get("session_id") or request.headers.get("X-Session-ID")
+    if not session_id:
+        raise HTTPException(400, "Missing session_id")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+                headers={"X-Session-ID": session_id},
+            )
+        if r.status_code != 200:
+            raise HTTPException(401, f"Google auth failed: {r.text[:200]}")
+        data = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Emergent OAuth session-data fetch failed: {e}")
+        raise HTTPException(500, "Failed to verify Google session")
+
+    email = (data.get("email") or "").strip().lower()
+    name = (data.get("name") or "").strip()
+    picture = data.get("picture") or ""
+    if not email:
+        raise HTTPException(400, "Google account missing email")
+
+    # Find or create the user
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        if not existing.get("is_active", True):
+            raise HTTPException(403, "Account disabled")
+        user = existing
+        # Backfill picture/name if not previously set
+        upd = {}
+        if name and not user.get("name"): upd["name"] = name
+        if picture and not user.get("picture"): upd["picture"] = picture
+        if upd:
+            await db.users.update_one({"_id": user["_id"]}, {"$set": upd})
+            user.update(upd)
+    else:
+        doc = {
+            "email": email,
+            "password_hash": "",  # Google-only login, no password
+            "name": name or email.split("@")[0],
+            "picture": picture,
+            "role": "user",
+            "auth_provider": "google",
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc),
+        }
+        result = await db.users.insert_one(doc)
+        doc["_id"] = result.inserted_id
+        user = doc
+
+    access = create_access_token(str(user["_id"]), email)
+    refresh = create_refresh_token(str(user["_id"]))
+    set_auth_cookies(response, access, refresh)
+    return {"user": user_out(user), "access_token": access}

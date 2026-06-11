@@ -31,8 +31,12 @@ def serialize(doc):
 # ── User Management ──
 @router.get("/users")
 async def list_users(request: Request):
+    """List admin/manager users only — end users (role='user') are hidden from this view."""
     await require_roles(*ADMIN_ROLES)(request)
-    docs = await db.users.find({}, {"password_hash": 0}).sort("created_at", -1).to_list(500)
+    docs = await db.users.find(
+        {"role": {"$nin": ["user", "end_user"]}},
+        {"password_hash": 0},
+    ).sort("created_at", -1).to_list(500)
     return [serialize(d) for d in docs]
 
 @router.post("/users")

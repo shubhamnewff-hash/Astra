@@ -1,0 +1,22 @@
+[build]
+  base    = "frontend"
+  command = "yarn install && yarn build"
+  publish = "build"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Proxy /api/* to the external backend so the frontend can reach it
+# Set REACT_APP_BACKEND_URL in Netlify → Site configuration → Environment variables
+# and replace the placeholder below with the same value.
+[[redirects]]
+  from   = "/api/*"
+  to     = "https://your-backend-url.com/api/:splat"
+  status = 200
+  force  = true
+
+# SPA catch-all — serve index.html for every client-side route
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
